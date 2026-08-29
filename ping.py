@@ -11,7 +11,7 @@ folders_queue = deque(["OBVVp1LI"])
 visited_folders = set()
 
 def get_browser_session():
-    """Launches browser for 5s to capture live tokens and headers, then closes."""
+    """Launches browser briefly to capture live tokens and headers."""
     print("🌐 Extracting active session credentials from browser...")
     captured = {"token": None, "wt": None, "headers": {}}
     
@@ -35,7 +35,7 @@ def get_browser_session():
         time.sleep(2)
         browser.close()
         
-    print("✅ Session credentials captured. Closed browser to save RAM.\n")
+    print("✅ Session credentials captured.\n")
     return captured
 
 def ping_file(session, url, name=""):
@@ -43,7 +43,7 @@ def ping_file(session, url, name=""):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": "https://gofile.io/",
-        "Range": "bytes=0-262144"  # 256 KB
+        "Range": "bytes=0-262144"
     }
     try:
         resp = session.get(url, headers=headers, timeout=10, stream=True)
@@ -59,7 +59,7 @@ def main():
     http_session = requests.Session()
     http_session.headers.update(headers)
 
-    print("🚀 Crawling folder hierarchy via high-speed API...")
+    print("🚀 Crawling folder hierarchy with full pagination...")
     
     while folders_queue:
         current_folder = folders_queue.popleft()
@@ -67,30 +67,59 @@ def main():
             continue
             
         visited_folders.add(current_folder)
-        api_url = f"https://api.gofile.io/contents/{current_folder}?contentFilter=&page=1&pageSize=1000&sortField=createTime&sortDirection=-1"
         
-        try:
-            res = http_session.get(api_url, timeout=10).json()
-            if res.get("status") == "ok":
-                children = res.get("data", {}).get("children", {})
+        # Paginate through each folder until no more pages remain
+        page_num = 1
+        while True:
+            api_url = f"https://api.gofile.io/contents/{current_folder}?page={page_num}&pageSize=20&sortField=createTime&sortDirection=-1"
+            
+            try:
+                res = http_session.get(api_url, timeout=10).json()
+                if res.get("status") != "ok":
+                    print(f"  ⚠️ Error fetching folder [{current_folder}] page {page_num}: {res.get('status')}")
+                    break
+
+                data = res.get("data", {})
+                children = data.get("children", {})
+                
+                # If page is empty, we reached the end of this folder
+                if not children:
+                    break
+
                 for item_id, item in children.items():
                     if item.get("type") == "file" and item.get("link"):
                         all_files[item_id] = (item.get("link"), item.get("name", "file"))
                     elif item.get("type") == "folder":
                         if item_id not in visited_folders and item_id not in folders_queue:
                             folders_queue.append(item_id)
-        except Exception as e:
-            print(f"  ⚠️ Error fetching folder [{current_folder}]: {e}")
+
+                # Check if we've fetched all items in this folder
+                total_children = data.get("totalChildren", 0)
+                total_pages = data.get("totalChildrenPages", 1)
+                
+                if page_num >= total_pages or len(children) == 0:
+                    break
+                    
+                page_num += 1
+                time.sleep(0.1)
+
+            except Exception as e:
+                print(f"  ⚠️ Exception on folder [{current_folder}] page {page_num}: {e}")
+                break
 
     total_files = list(all_files.values())
-    print(f"\n✅ Discovered {len(total_files)} files across {len(visited_folders)} folders.")
+    print(f"\n✅ Discovered {len(total_files)} total files across {len(visited_folders)} folders (Full Pagination Complete).")
+
+    if not total_files:
+        print("⚠️ No files found.")
+        sys.exit(0)
 
     print(f"\n🚀 Sending Keep-Alive pings to {len(total_files)} file(s)...\n")
     for link, name in total_files:
         ping_file(http_session, link, name)
-        time.sleep(0.1)  # Fast 100ms pause
+        time.sleep(0.1)
 
-    print("\n🎉 Entire storage library kept alive with minimal resource consumption!")
+    print("\n🎉 Entire storage library kept alive!")
 
 if __name__ == "__main__":
     main()
