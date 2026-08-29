@@ -2,9 +2,9 @@ name: Gofile Keep-Alive Pinger
 
 on:
   schedule:
-    # Runs automatically every 4 days at 00:00 UTC
+    # Runs every 4 days at midnight UTC
     - cron: '0 0 */4 * *'
-  workflow_dispatch: # Enables manual trigger button
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -19,9 +19,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install requests
+        run: |
+          pip install requests playwright
+          playwright install chromium --with-deps
 
       - name: Run Keep-Alive Script
-        env:
-          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
         run: python ping.py
