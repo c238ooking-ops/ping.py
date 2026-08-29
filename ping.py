@@ -6,14 +6,14 @@ from playwright.sync_api import sync_playwright
 
 ROOT_URL = "https://gofile.io/d/OBVVp1LI"
 
-all_files = {}       # item_id -> (download_link, name)
-folders_queue = deque(["OBVVp1LI"])
+all_files = {}       # id -> (url, name)
+folders_queue = deque([("OBVVp1LI", "Root Folder")])
 visited_folders = set()
 
 def get_browser_session():
-    """Launches browser briefly to capture live tokens and headers."""
+    """Extracts live browser session headers and token."""
     print("🌐 Extracting active session credentials from browser...")
-    captured = {"token": None, "wt": None, "headers": {}}
+    captured = {"headers": {}}
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -24,11 +24,7 @@ def get_browser_session():
 
         def intercept_request(request):
             if "contents/" in request.url:
-                captured["headers"] = request.headers
-                if "x-website-token" in request.headers:
-                    captured["wt"] = request.headers["x-website-token"]
-                if "authorization" in request.headers:
-                    captured["token"] = request.headers["authorization"]
+                captured["headers"] = dict(request.headers)
 
         page.on("request", intercept_request)
         page.goto(ROOT_URL, wait_until="networkidle", timeout=30000)
@@ -39,14 +35,14 @@ def get_browser_session():
     return captured
 
 def ping_file(session, url, name=""):
-    """Lightweight 256 KB chunk stream to reset file expiry."""
+    """Pings a file to reset expiration."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": "https://gofile.io/",
-        "Range": "bytes=0-262144"
+        "Range": "bytes=0-262144"  # 256 KB chunk
     }
     try:
-        resp = session.get(url, headers=headers, timeout=10, stream=True)
+        resp = session.get(url, headers=headers, timeout=12, stream=True)
         _ = resp.raw.read(262144)
         print(f"      📄 Active ({resp.status_code}): {name}")
     except Exception as e:
@@ -54,72 +50,84 @@ def ping_file(session, url, name=""):
 
 def main():
     session_data = get_browser_session()
-    headers = session_data["headers"]
-    
     http_session = requests.Session()
-    http_session.headers.update(headers)
+    http_session.headers.update(session_data["headers"])
 
-    print("🚀 Crawling folder hierarchy with full pagination...")
+    print("🚀 Crawling root folder and all subfolders...\n")
     
     while folders_queue:
-        current_folder = folders_queue.popleft()
-        if current_folder in visited_folders:
+        current_folder_id, current_folder_name = folders_queue.popleft()
+        if current_folder_id in visited_folders:
             continue
             
-        visited_folders.add(current_folder)
+        visited_folders.add(current_folder_id)
         
-        # Paginate through each folder until no more pages remain
         page_num = 1
+        folder_found_files = 0
+        folder_found_subfolders = 0
+
         while True:
-            api_url = f"https://api.gofile.io/contents/{current_folder}?page={page_num}&pageSize=20&sortField=createTime&sortDirection=-1"
+            api_url = f"https://api.gofile.io/contents/{current_folder_id}?page={page_num}&pageSize=50&sortField=createTime&sortDirection=-1"
             
             try:
-                res = http_session.get(api_url, timeout=10).json()
+                res = http_session.get(api_url, timeout=12).json()
                 if res.get("status") != "ok":
-                    print(f"  ⚠️ Error fetching folder [{current_folder}] page {page_num}: {res.get('status')}")
+                    print(f"  ⚠️ Folder [{current_folder_name} ({current_folder_id})] returned status: {res.get('status')}")
                     break
 
                 data = res.get("data", {})
                 children = data.get("children", {})
                 
-                # If page is empty, we reached the end of this folder
                 if not children:
                     break
 
                 for item_id, item in children.items():
-                    if item.get("type") == "file" and item.get("link"):
-                        all_files[item_id] = (item.get("link"), item.get("name", "file"))
-                    elif item.get("type") == "folder":
-                        if item_id not in visited_folders and item_id not in folders_queue:
-                            folders_queue.append(item_id)
+                    item_type = item.get("type", "")
+                    item_name = item.get("name", item_id)
+                    
+                    if item_type == "folder":
+                        folder_code = item.get("code") or item.get("id") or item_id
+                        if folder_code not in visited_folders and all(folder_code != f[0] for f in folders_queue):
+                            folders_queue.append((folder_code, item_name))
+                            folder_found_subfolders += 1
+                    else:
+                        # Resilient download link extraction
+                        dl_url = item.get("link") or item.get("directDownload") or item.get("downloadPage")
+                        if not dl_url:
+                            dl_url = f"https://api.gofile.io/contents/{item_id}"
+                            
+                        if item_id not in all_files:
+                            all_files[item_id] = (dl_url, item_name)
+                            folder_found_files += 1
 
-                # Check if we've fetched all items in this folder
-                total_children = data.get("totalChildren", 0)
                 total_pages = data.get("totalChildrenPages", 1)
-                
                 if page_num >= total_pages or len(children) == 0:
                     break
                     
                 page_num += 1
-                time.sleep(0.1)
+                time.sleep(0.05)
 
             except Exception as e:
-                print(f"  ⚠️ Exception on folder [{current_folder}] page {page_num}: {e}")
+                print(f"  ⚠️ Error parsing folder [{current_folder_name}]: {e}")
                 break
 
+        print(f"📂 [{current_folder_name}] ➜ {folder_found_files} file(s), {folder_found_subfolders} subfolder(s)")
+
     total_files = list(all_files.values())
-    print(f"\n✅ Discovered {len(total_files)} total files across {len(visited_folders)} folders (Full Pagination Complete).")
+    print(f"\n========================================================")
+    print(f"✅ DISCOVERY COMPLETE: {len(total_files)} total files across {len(visited_folders)} folders")
+    print(f"========================================================\n")
 
     if not total_files:
-        print("⚠️ No files found.")
+        print("⚠️ No files found to ping.")
         sys.exit(0)
 
-    print(f"\n🚀 Sending Keep-Alive pings to {len(total_files)} file(s)...\n")
+    print(f"🚀 Pinging all {len(total_files)} files...\n")
     for link, name in total_files:
         ping_file(http_session, link, name)
         time.sleep(0.1)
 
-    print("\n🎉 Entire storage library kept alive!")
+    print("\n🎉 All files and folders successfully kept alive!")
 
 if __name__ == "__main__":
     main()
