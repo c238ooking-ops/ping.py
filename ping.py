@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import sys
@@ -9,23 +10,29 @@ import requests
 ROOT_URL = "https://gofile.io/d/OBVVp1LI#page"
 # ---------------------------------------------------------
 
-BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Sec-Fetch-Site": "cross-site",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Dest": "empty",
-}
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+LANG = "en-US"
+SALT = "9844d94d963d30"
 
-def create_fresh_guest_token():
-    """Generates a brand new anonymous guest account session on Gofile."""
+def generate_website_token(account_token=""):
+    """Computes the dynamic X-Website-Token required to browse folders as a free web client."""
+    time_slot = int(time.time()) // 14400
+    raw_str = f"{USER_AGENT}::{LANG}::{account_token}::{time_slot}::{SALT}"
+    return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
+
+def get_guest_token():
+    """Generates a fresh guest session token."""
     try:
-        res = requests.post("https://api.gofile.io/accounts", headers=BASE_HEADERS, timeout=10).json()
+        res = requests.post(
+            "https://api.gofile.io/accounts",
+            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+            timeout=10
+        ).json()
         if res.get("status") == "ok":
             return res["data"]["token"]
     except Exception as e:
-        print(f"⚠️ Guest session creation error: {e}")
-    return None
+        print(f"⚠️ Guest account token fallback: {e}")
+    return ""
 
 def extract_content_id(url):
     url = url.strip()
@@ -33,32 +40,42 @@ def extract_content_id(url):
     return match.group(1) if match else url.split('/')[-1]
 
 def ping_direct_file(url, name=""):
-    # Generate a fresh guest session token per file ping
-    token = create_fresh_guest_token()
+    token = get_guest_token()
     headers = {
-        **BASE_HEADERS,
+        "User-Agent": USER_AGENT,
         "Range": "bytes=0-1024",
-        "Referer": "https://gofile.io/"
+        "Referer": "https://gofile.io/",
+        "X-BL": LANG,
+        "X-Website-Token": generate_website_token(token)
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     try:
         resp = requests.get(url, headers=headers, timeout=15)
-        print(f"      📄 Active ({resp.status_code}): {name or url} [Guest Session Reset]")
+        print(f"      📄 Active ({resp.status_code}): {name or url}")
     except Exception as e:
         print(f"      ❌ Error pinging file {name}: {e}")
 
-def crawl_and_ping(content_id, depth=0, folder_token=None):
+def crawl_and_ping(content_id, depth=0):
     indent = "  " * depth
     print(f"{indent}📂 Scanning Folder [{content_id}]...")
 
-    headers = {**BASE_HEADERS}
-    if folder_token:
-        headers["Authorization"] = f"Bearer {folder_token}"
+    token = get_guest_token()
+    wt = generate_website_token(token)
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "X-BL": LANG,
+        "X-Website-Token": wt,
+        "Accept": "*/*",
+        "Referer": f"https://gofile.io/d/{content_id}"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     try:
-        api_url = f"https://api.gofile.io/contents/{content_id}"
+        api_url = f"https://api.gofile.io/contents/{content_id}?contentFilter=&page=1&pageSize=1000&sortField=createTime&sortDirection=-1"
         resp = requests.get(api_url, headers=headers, timeout=15).json()
 
         if resp.get("status") != "ok":
@@ -77,7 +94,7 @@ def crawl_and_ping(content_id, depth=0, folder_token=None):
             item_name = item.get("name", "Unnamed")
 
             if item_type == "folder":
-                crawl_and_ping(item_id, depth + 1, folder_token)
+                crawl_and_ping(item_id, depth + 1)
             else:
                 download_link = item.get("link")
                 if download_link:
@@ -88,16 +105,9 @@ def crawl_and_ping(content_id, depth=0, folder_token=None):
 
 def main():
     root_id = extract_content_id(ROOT_URL)
-    print(f"🚀 Starting Keep-Alive with Dynamic Guest Sessions for: {root_id}\n")
-    
-    # 1. Acquire initial token to read folder index
-    initial_token = create_fresh_guest_token()
-    if not initial_token:
-        # Fallback to repository secret if public guest creation fails
-        initial_token = os.environ.get("GOFILE_TOKEN", "").strip()
-
-    crawl_and_ping(root_id, folder_token=initial_token)
-    print("\n🎉 Entire storage hierarchy recursively scanned and pinged with unique guest sessions!")
+    print(f"🚀 Starting Keep-Alive Crawl for Root Folder ID: {root_id}\n")
+    crawl_and_ping(root_id)
+    print("\n🎉 Entire storage hierarchy recursively scanned and pinged!")
 
 if __name__ == "__main__":
     main()
