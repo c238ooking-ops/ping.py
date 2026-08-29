@@ -3,7 +3,7 @@ import time
 import requests
 from playwright.sync_api import sync_playwright
 
-ROOT_URL = "https://gofile.io/d/OBVVp1LI#page"
+ROOT_URL = "https://gofile.io/d/OBVVp1LI"
 
 def ping_direct_file(url, name=""):
     try:
