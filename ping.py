@@ -6,7 +6,11 @@ import requests
 from collections import deque
 from playwright.sync_api import sync_playwright
 
-ROOT_URL = "https://gofile.io/d/OBVVp1LI"
+ROOT_URL = os.environ.get("GOFILE_ROOT_URL")
+
+if not ROOT_URL:
+    print("❌ Error: GOFILE_ROOT_URL secret is not configured in GitHub repository secrets.")
+    sys.exit(1)
 
 all_files = {}       # id -> (url, name)
 folders_queue = deque([("OBVVp1LI", "Root Folder")])
