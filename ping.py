@@ -8,7 +8,6 @@ from playwright.sync_api import sync_playwright
 ROOT_URL = "https://gofile.io/d/OBVVp1LI"
 ROOT_CODE = "OBVVp1LI"
 
-# Store unique files as dict of url -> name to prevent ID collisions
 discovered_files = {}
 folders_queue = deque([(ROOT_CODE, "Root Folder")])
 visited_folders = set()
@@ -51,9 +50,9 @@ class SessionManager:
         if time.time() - self.last_auth_time > 900:
             self.refresh_credentials()
 
-def fetch_folder_contents(session_mgr, folder_code, page_num=1, max_retries=4):
-    """Queries Gofile API with automatic backoff for rate limits."""
-    api_url = f"https://api.gofile.io/contents/{folder_code}?page={page_num}&pageSize=50&sortField=createTime&sortDirection=-1"
+def fetch_folder_page(session_mgr, folder_code, page_num=1, max_retries=4):
+    """Fetches a single page with retries on rate limits."""
+    api_url = f"https://api.gofile.io/contents/{folder_code}?page={page_num}&pageSize=50"
     
     for attempt in range(max_retries):
         session_mgr.ensure_fresh()
@@ -95,7 +94,7 @@ def ping_fast(session_mgr, url, name=""):
 def main():
     session_mgr = SessionManager(ROOT_URL)
 
-    print("🚀 Crawling Gofile folder tree (Exact Code & Collision-Proof Resolution)...\n")
+    print("🚀 Crawling Gofile folder tree (Complete Deep Scan)...\n")
     
     while folders_queue:
         current_folder_code, current_folder_name = folders_queue.popleft()
@@ -108,46 +107,52 @@ def main():
         page_num = 1
         folder_found_files = 0
         folder_found_subfolders = 0
+        seen_in_this_folder = set()
 
         while True:
-            res = fetch_folder_contents(session_mgr, current_folder_code, page_num)
+            res = fetch_folder_page(session_mgr, current_folder_code, page_num)
             
             if not res or res.get("status") != "ok":
                 status_str = res.get("status") if res else "No response"
-                print(f"  ❌ Folder [{current_folder_name} ({current_folder_code})] failed: {status_str}")
+                if page_num == 1:
+                    print(f"  ❌ Folder [{current_folder_name} ({current_folder_code})] failed: {status_str}")
                 break
 
             data = res.get("data", {})
             children = data.get("children", {})
             
+            # Exhaustive check: Stop only when zero children are returned
             if not children:
                 break
 
+            new_items_on_page = 0
+
             for key, item in children.items():
+                item_id = item.get("id") or key
+                if item_id in seen_in_this_folder:
+                    continue
+                seen_in_this_folder.add(item_id)
+                new_items_on_page += 1
+
                 item_type = item.get("type", "")
                 item_name = item.get("name", key)
 
                 if item_type == "folder":
-                    # Strictly use 'code' for API navigation; fallback to id/key only if code is absent
                     next_code = item.get("code") or item.get("id") or key
                     if next_code not in visited_folders and all(next_code != f[0] for f in folders_queue):
                         folders_queue.append((next_code, item_name))
                         folder_found_subfolders += 1
                 else:
-                    # Resolve download link across all potential API keys
                     dl_url = item.get("link") or item.get("directDownload") or item.get("downloadPage")
                     if not dl_url:
-                        dl_url = f"https://api.gofile.io/contents/{item.get('id') or key}"
+                        dl_url = f"https://api.gofile.io/contents/{item_id}"
 
-                    # Save indexed by direct URL to avoid any item_id overwrite collisions
                     if dl_url not in discovered_files:
                         discovered_files[dl_url] = item_name
                         folder_found_files += 1
 
-            total_pages = data.get("totalChildrenPages", 1)
-            total_children = data.get("totalChildren", 0)
-
-            if page_num >= total_pages or len(children) == 0:
+            # If page provided no new items or had less than pageSize, we hit the end
+            if new_items_on_page == 0 or len(children) < 50:
                 break
                 
             page_num += 1
@@ -170,7 +175,7 @@ def main():
         ping_fast(session_mgr, link, name)
         time.sleep(0.15)
 
-    print("\n🎉 Keep-alive sequence complete! All files refreshed without omissions.")
+    print("\n🎉 Keep-alive sequence complete! All files refreshed.")
 
 if __name__ == "__main__":
     main()
