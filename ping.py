@@ -1,16 +1,11 @@
 import os
-import random
 import sys
 import time
 import requests
 from collections import deque
 from playwright.sync_api import sync_playwright
 
-ROOT_URL = os.environ.get("GOFILE_ROOT_URL")
-
-if not ROOT_URL:
-    print("❌ Error: GOFILE_ROOT_URL secret is not configured in GitHub repository secrets.")
-    sys.exit(1)
+ROOT_URL = "https://gofile.io/d/OBVVp1LI"
 
 all_files = {}       # id -> (url, name)
 folders_queue = deque([("OBVVp1LI", "Root Folder")])
@@ -24,7 +19,7 @@ class SessionManager:
         self.refresh_credentials()
 
     def refresh_credentials(self):
-        """Extracts fresh browser session token & headers."""
+        """Grabs clean browser session token & headers using Chromium."""
         print("🌐 Refreshing active browser session credentials...")
         captured = {"headers": {}}
         
@@ -51,11 +46,12 @@ class SessionManager:
         print("✅ Fresh session credentials loaded.\n")
 
     def ensure_fresh(self):
+        # Auto-refresh session headers if script runs longer than 15 minutes
         if time.time() - self.last_auth_time > 900:
             self.refresh_credentials()
 
 def fetch_folder_strict(session_mgr, folder_id, page_num=1, max_retries=5):
-    """Fetches folder with backoff, ensuring no folder is skipped due to rate limits."""
+    """Fetches folder contents with backoff, ensuring zero folders are dropped."""
     api_url = f"https://api.gofile.io/contents/{folder_id}?page={page_num}&pageSize=50&sortField=createTime&sortDirection=-1"
     
     for attempt in range(max_retries):
@@ -82,11 +78,11 @@ def fetch_folder_strict(session_mgr, folder_id, page_num=1, max_retries=5):
     return None
 
 def ping_fast(session_mgr, url, name=""):
-    """Ultra-lightweight 64 KB read to trigger download registers quickly."""
+    """Ultra-lightweight 64 KB chunk stream to reset file expiry."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://gofile.io/",
-        "Range": "bytes=0-65535"  # 64 KB chunk
+        "Range": "bytes=0-65535"  # 64 KB read
     }
     try:
         resp = session_mgr.session.get(url, headers=headers, timeout=15, stream=True)
@@ -116,7 +112,7 @@ def main():
             
             if not res or res.get("status") != "ok":
                 status_str = res.get("status") if res else "No response"
-                print(f"  ❌ Critical: Folder [{current_folder_name}] failed: {status_str}")
+                print(f"  ❌ Folder [{current_folder_name}] failed: {status_str}")
                 break
 
             data = res.get("data", {})
@@ -148,12 +144,10 @@ def main():
                 break
                 
             page_num += 1
-            time.sleep(2.0)  # Pacing between pagination pages
+            time.sleep(1.8)
 
         print(f"📂 [{current_folder_name}] ➜ {folder_found_files} file(s), {folder_found_subfolders} subfolder(s)")
-        
-        # Pacing between folders to stay under the 25 req/min threshold
-        time.sleep(2.5)
+        time.sleep(2.2)  # Pacing to stay comfortably below Gofile's rate-limit ceiling
 
     total_files = list(all_files.values())
     print("\n========================================================")
@@ -167,7 +161,7 @@ def main():
     print(f"🚀 Sending 64KB pings to {len(total_files)} file(s)...\n")
     for link, name in total_files:
         ping_fast(session_mgr, link, name)
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     print("\n🎉 Keep-alive sequence complete! All files refreshed.")
 
