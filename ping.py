@@ -20,7 +20,7 @@ class SessionManager:
         self.refresh_credentials()
 
     def refresh_credentials(self):
-        """Launches headless Chromium briefly to grab live session tokens & headers."""
+        """Extracts fresh browser session token & headers."""
         print("🌐 Refreshing active browser session credentials...")
         captured = {"headers": {}}
         
@@ -47,16 +47,11 @@ class SessionManager:
         print("✅ Fresh session credentials loaded.\n")
 
     def ensure_fresh(self):
-        # Auto-refresh session headers if script runs longer than 15 minutes
         if time.time() - self.last_auth_time > 900:
             self.refresh_credentials()
 
-def polite_sleep(min_s=1.0, max_s=2.2):
-    """Randomized pause to avoid triggering anti-bot heuristics."""
-    time.sleep(random.uniform(min_s, max_s))
-
-def fetch_folder_with_backoff(session_mgr, folder_id, page_num=1, max_retries=4):
-    """Fetches folder contents via Gofile API with automatic exponential backoff."""
+def fetch_folder_strict(session_mgr, folder_id, page_num=1, max_retries=5):
+    """Fetches folder with backoff, ensuring no folder is skipped due to rate limits."""
     api_url = f"https://api.gofile.io/contents/{folder_id}?page={page_num}&pageSize=50&sortField=createTime&sortDirection=-1"
     
     for attempt in range(max_retries):
@@ -67,12 +62,14 @@ def fetch_folder_with_backoff(session_mgr, folder_id, page_num=1, max_retries=4)
 
             if status == "ok":
                 return res
-            elif status in ["error-rateLimit", "error-auth", "error-token"]:
-                cool_off = (attempt + 1) * 12
-                print(f"    ⏳ [{status}] Cooling off for {cool_off}s...")
+            elif status in ["error-rateLimit", "429"]:
+                cool_off = 15 + (attempt * 5)
+                print(f"    ⏳ Rate limit encountered. Pausing {cool_off}s before retry (Attempt {attempt+1}/{max_retries})...")
                 time.sleep(cool_off)
-                if status in ["error-auth", "error-token"]:
-                    session_mgr.refresh_credentials()
+            elif status in ["error-auth", "error-token"]:
+                print("    🔑 Session expired. Refreshing...")
+                session_mgr.refresh_credentials()
+                time.sleep(3)
             else:
                 return res
         except Exception as e:
@@ -80,35 +77,24 @@ def fetch_folder_with_backoff(session_mgr, folder_id, page_num=1, max_retries=4)
             
     return None
 
-def ping_file(session_mgr, url, name=""):
-    """Streams a full 10 MB payload without Range headers to trigger Gofile's activity counter."""
+def ping_fast(session_mgr, url, name=""):
+    """Ultra-lightweight 64 KB read to trigger download registers quickly."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://gofile.io/",
-        "Accept": "*/*"
+        "Range": "bytes=0-65535"  # 64 KB chunk
     }
     try:
-        with session_mgr.session.get(url, headers=headers, timeout=30, stream=True) as resp:
-            if resp.status_code == 200:
-                downloaded = 0
-                target_bytes = 10 * 1024 * 1024  # 10 MB
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        downloaded += len(chunk)
-                        if downloaded >= target_bytes:
-                            break
-                print(f"      📄 Counted ({resp.status_code} - {downloaded // (1024*1024)}MB): {name}")
-            elif resp.status_code == 206:
-                print(f"      ⚠️ Partial Content (206): {name}")
-            else:
-                print(f"      ⚠️ Non-200 Status ({resp.status_code}): {name}")
+        resp = session_mgr.session.get(url, headers=headers, timeout=15, stream=True)
+        _ = resp.raw.read(65535)
+        print(f"      📄 Counted ({resp.status_code}): {name}")
     except Exception as e:
         print(f"      ❌ Error on {name}: {e}")
 
 def main():
     session_mgr = SessionManager(ROOT_URL)
 
-    print("🚀 Crawling Gofile directory tree...\n")
+    print("🚀 Crawling complete folder tree without dropping end folders...\n")
     
     while folders_queue:
         current_folder_id, current_folder_name = folders_queue.popleft()
@@ -122,11 +108,11 @@ def main():
         folder_found_subfolders = 0
 
         while True:
-            res = fetch_folder_with_backoff(session_mgr, current_folder_id, page_num)
+            res = fetch_folder_strict(session_mgr, current_folder_id, page_num)
             
             if not res or res.get("status") != "ok":
                 status_str = res.get("status") if res else "No response"
-                print(f"  ⚠️ Folder [{current_folder_name} ({current_folder_id})] skipped: {status_str}")
+                print(f"  ❌ Critical: Folder [{current_folder_name}] failed: {status_str}")
                 break
 
             data = res.get("data", {})
@@ -158,10 +144,12 @@ def main():
                 break
                 
             page_num += 1
-            polite_sleep(1.0, 1.8)
+            time.sleep(2.0)  # Pacing between pagination pages
 
         print(f"📂 [{current_folder_name}] ➜ {folder_found_files} file(s), {folder_found_subfolders} subfolder(s)")
-        polite_sleep(1.2, 2.2)
+        
+        # Pacing between folders to stay under the 25 req/min threshold
+        time.sleep(2.5)
 
     total_files = list(all_files.values())
     print("\n========================================================")
@@ -172,12 +160,12 @@ def main():
         print("⚠️ No files found to ping.")
         sys.exit(0)
 
-    print(f"🚀 Sending 10MB Keep-Alive download streams to {len(total_files)} file(s)...\n")
+    print(f"🚀 Sending 64KB pings to {len(total_files)} file(s)...\n")
     for link, name in total_files:
-        ping_file(session_mgr, link, name)
-        polite_sleep(1.0, 2.0)
+        ping_fast(session_mgr, link, name)
+        time.sleep(0.3)
 
-    print("\n🎉 Keep-alive sequence complete! Expiration timers reset on all files.")
+    print("\n🎉 Keep-alive sequence complete! All files refreshed.")
 
 if __name__ == "__main__":
     main()
